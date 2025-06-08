@@ -12,7 +12,7 @@
 
 This repository contains my solution to the AMD FP8 GEMM Challenge, organized by the GPU Mode community. The solution is beginner-friendly HIP kernel with just 100 lines of code but still managed to achieve rank 5/163 by the end of the competition.
 
-In addition to the solution, this repository includes a comparison of FP8 quantized matrix multiplication (GEMM) with PyTorch’s BF16 GEMM, specifically on the AMD MI300X GPU, evaluating: Memory usage, accurac and throughput.
+In addition to the solution, this repository includes a comparison of FP8 quantized matrix multiplication (GEMM) with PyTorch’s BF16 GEMM, specifically on the AMD MI300X GPU, evaluating: Memory usage, accuracy and throughput.
 
 The code explores three FP8 scaling strategies:
 - **Global scaling**
