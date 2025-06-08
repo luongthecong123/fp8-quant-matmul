@@ -1,0 +1,14 @@
+# === Exceptions for common build artifacts ===
+# Compiled binaries and object files
+*.o
+*.bc
+*.s
+*.out
+*.hipi
+*.hipfb
+sgemm-hip-amdgcn-amd-amdhsa-gfx942.out.resolution.txt
+# Result and log files
+results.*
+rocprof_counters.*
+check
+sgemm
