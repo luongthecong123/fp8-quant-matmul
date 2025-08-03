@@ -25,7 +25,7 @@ To check correctness
 hipcc -o check check.cu
 ./check
 ```
-
+Note: Your rocm version must contain /opt/rocm/include/hip/hip_fp8.h (compatible with CDNA3).
 To run benchmark:
 ```
 hipcc -o sgemm sgemm.cu --offload-arch=gfx942 -std=c++20 -Rpass-analysis=kernel-resource-usage --save-temps
