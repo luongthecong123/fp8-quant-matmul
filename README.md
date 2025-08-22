@@ -56,21 +56,36 @@ MI300X provides 2 matrix core instructions to help calculate small matrix multip
         Execution cycles: 16
         FLOPs/CU/cycle: 4096
 ```
+<div align="center">
+  <table>
+    <tr>
+      <td align="center">
+        <h5>32x32x16 matC thread-register mapping</h3>
+        <img src="images\thread-register-mapping-matC-32x32x16.png" alt="32x32x16 VGPR Layout" width="600"/>
+      </td>
+      <td align="center">
+        <h5>16x16x32 matC thread-register mapping</h3>
+        <img src="images\thread-register-mapping-matC-16x16x32.png" alt="16x16x32 VGPR Layout" width="600"/>
+      </td>
+    </tr>
+  </table>
+</div>
+
 ### Overall
-For my solution, I used 32x32x16 instruction to calculate GEMM on problems with large M, N due to better athrimetic intensity (1 warp of 64 threads can calculate 32x32 elements in matC). And used 16x16x32 instruction for problems where M, N are small but K is large. rocwmma api is used to perform matrix core operations since I found that it led to less register spills.
+For my solution, I used 32x32x16 instruction to calculate GEMM on problems with large M, N due to better arithmetic intensity (1 warp of 64 threads can calculate 32x32 elements in matC). And used 16x16x32 instruction for problems where M, N are small but K is large. rocwmma api is used to perform matrix core operations since I found that it led to less register spills.
 
 ### Maximize hardware utilization
 MI300X has a cache line of 128 bytes, which matched the size of block scaling, it's beneficial that 1 warp loads data from the same cache line. Data will be loaded from global memory in chunk of 128 bytes at a time, retrieve data found in the cache line will result in a cache hit, where it only cost us the memory access latency of L2 or L1 cache instead of the slow global memory. 
 MI300X also provided us with 64 KB of shared memory (LDS) with the same speed as L1 cache, for which all threads within a block can share and access at a lower latency compared to L2 cache. We can use this for data reuse in block partitioned matrix multiplication.
 Each Compute unit in MI300X can handle 2048 threads, and each block has max thread of 1024. I will launch 2 blocks on each compute units so each block can have 32 KB of LDS to load larger tiles.
-Loop unrolling in essential since it helps the compiler to see the future and plans loading of a chunk of data and share it to each iteration or calculate offset before hand. One should make fine tune #pragma unroll to unroll fully or not unrolling at all #pragma unroll 1 to keep 64 VGPRs (vector registers) per thread for maximum theoretical occupancy per Compute Unit, maximum occupancy can help hides latency by switching to run other threads while the current threads are waiting for data to arrive. For viewing register pressure, there is a very good blog post for that https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-register-pressure-readme/ . TLDR, you can generate generated assembly and view VGPRs, SGPRs usage and occupancy using:
+Loop unrolling is essential since it helps the compiler to see the future and plans loading of a chunk of data and share it to each iteration or calculate offset before hand. One should make fine tune #pragma unroll to unroll fully or not unrolling at all #pragma unroll 1 to keep 64 VGPRs (vector registers) per thread for maximum theoretical occupancy per Compute Unit, maximum occupancy can help hides latency by switching to run other threads while the current threads are waiting for data to arrive. For viewing register pressure, there is a very good blog post for that https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-register-pressure-readme/ . TLDR, you can generate generated assembly and view VGPRs, SGPRs usage and occupancy using:
 ```
 hipcc -o sgemm sgemm.cu --offload-arch=gfx942 -std=c++20 -Rpass-analysis=kernel-resource-usage --save-temps
 ```
 
 ### Kernel for large M, N
 For each block, I used 3 types of shared memory:
-```
+```cuda
 __shared__ __hip_fp8_e4m3_fnuz tileA[128][72]; // row-major
 __shared__ __hip_fp8_e4m3_fnuz tileB[128][72]; // col-major, = row-major transposed
 __shared__ float tileAs[128];
@@ -85,7 +100,7 @@ Looking at the mapping between the thread and the register according to https://
 
 The following code load use 64 threads in a warp to load 128 contiguous elements in a column of matrix A (col-maj) to 128 strided elements in a column in tileA (row-maj):
 
-```
+```cuda
 tileA[t64x][kmini_load + t64y] = A_ptr[blockIdx.y * WMMA_M * NUM_WARP_Y + t64x + M * (kbase + kmini_load + t64y)];
 tileA[t64x + 64][kmini_load + t64y] = A_ptr[blockIdx.y * WMMA_M * NUM_WARP_Y + t64x + 64 + M * (kbase + kmini_load + t64y)];
 ```
@@ -98,7 +113,7 @@ Padding of 8 elements from 64 to 72 for the K-dimension to avoid bank conflict. 
 To calculate a full 128x128 block , we need 2 load loops (each load 128x64 elements per matrix) and 2 mfma loops and 1 loop to apply scalers. I found that this is faster than loading a full 128x128 block where we have to wait until 128x128 elements are fully loaded before we can do matmul. Upon inspecting the compiled code, we can see that the loading of scaling factor from SMEM to registers are interleaved with the second mfma which helped hide latency.
 
 After the second matmul, we can apply scaler. Loading the scaler in shared memory provides the benefit of the compiler generating ds_read_b128 instruction to fetch data to calculate shared memory on the accumulation fragments which is very fast:
-```
+```cuda
 #pragma unroll
 for (int i = 0; i < 4; ++i){
     #pragma unroll
@@ -113,12 +128,12 @@ Here, 2 accumulation fragments are used, one for the global accumulation (master
 
 For these problems, I used 16x16x32 mfma instruction, each block has 16 warps (1024 threads), to calculate an output tile of 64x64 elements in matrix C. Here, we can split the matmul into more blocks to better saturate the 304 CUs of MI300X. For problem such as: K = 7168, M = 1024, N = 512. If we use 32x32x16 to calculate 128x128, we only launch 1024x512/(128x128) = 32 blocks, each CU manages 2 blocks, that equals to using only 16/304 CUs, very low achieved occupancy. But if we use 16x16x32 to calculate 64x64 elements per block, we get 64/304 CUs, that's 4 times the achieved occupancy. For larger M, N since we launch multiple full waves (different from wave front), the poor achieved occupancy of the last wave is neligible.
 For this kernel, I perform C.T = B @ A.T to load tileAs into register in a coalesced and straight forward manner. Each block used a full 32 KB LDS:
-```
+```cuda
 __shared__ __hip_fp8_e4m3_fnuz tileA[64][256]; // col-maj = row-maj transposed 
 __shared__ __hip_fp8_e4m3_fnuz tileB[64][256]; // row-maj
 ```
 To load these without bank conflict, rotating is used, where the next row is shifted by 8 elements, elements that overshoot the dimension limit will be wrapped around using modulo "% 128" for 128 elements. Modulo " % 16" is used to reduce computation since the pattern will be repeated after 16 rows. I found that rotating reduced VGPR pressure compared to XOR swizzling, I think that is because this pattern is more predictable for the compiler.
-```
+```cuda
 #pragma unroll
 for (int kmini = 0; kmini < 128; kmini += 16){ // 16 is num group
     int K_idx_shifty = (kmini + t64y + 8 * (t64x % 16)) % 128;            
@@ -127,7 +142,7 @@ for (int kmini = 0; kmini < 128; kmini += 16){ // 16 is num group
 }
 ```
 Next, calculate the rotated index to load the correct elements to the 2 VGPRs per lane. memcpy will copy a sizeof(long) = 8 bytes data straight from the address at first element of a frag in SMEM to the address at first element of the 2 VGPRs of frag_a and frag_b (using &frag_a.x[0]).
-```
+```cuda
 #pragma unroll
 for (int kmini = 0; kmini < 128; kmini += WMMA_K){
     int tileB_row = warp_idx_y * WMMA_M + t64x % 16;
@@ -143,7 +158,7 @@ for (int kmini = 0; kmini < 128; kmini += WMMA_K){
 ```
 
 Here, we load 2 blocks of 128 K-elements, therefore we need to also load 2 scaling factors. The below scaling factors are loaded directly into register without using SMEM since we have used up all available SMEM for tileA and tileB.
-```
+```cuda
 float tileAs1 = As_ptr[(kbase / 128) * M + col_base_C + t64x % WMMA_N];
 float tileBs1 = Bs_ptr[(kbase / 128) * sn + (blockIdx.y * NUM_WARP_Y * WMMA_M) / 128];
 float scale1 = tileAs1 * tileBs1;
