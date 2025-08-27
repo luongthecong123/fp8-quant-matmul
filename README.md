@@ -10,7 +10,19 @@
 
 ## Summary
 
-This repository contains my solution to the AMD FP8 GEMM Challenge, organized by the GPU Mode community. The solution is beginner-friendly HIP kernel with just 100 lines of code but still managed to achieve rank 5/163 by the end of the competition.
+This repository contains my solution to the AMD FP8 GEMM Challenge, organized by the GPU Mode community. The solution is beginner-friendly HIP kernel with just 100 lines of code but still managed to achieve rank 5/163 by the end of the competition, mean geometric latency: 136 us.
+
+| k    | m    | n    | latency (us) | k    | m    | n    | latency (us) |
+|------|------|------|---------|------|------|---------|---------|
+| 7168 | 1024 | 1536 | 147     | 7168 | 6144 | 1536    | 341     |
+| 1536 | 1024 | 3072 | 50.6    | 1536 | 6144 | 3072    | 160     |
+| 7168 | 1024 | 576  | 75.9    | 7168 | 6144 | 576     | 173     |
+| 256  | 1024 | 7168 | 30.9    | 256  | 6144 | 7168    | 88.6    |
+| 2048 | 1024 | 7168 | 106     | 2048 | 6144 | 7168    | 426     |
+| 7168 | 1024 | 4608 | 193     | 7168 | 6144 | 4608    | 948     |
+| 2304 | 1024 | 7168 | 120     | 2304 | 6144 | 7168    | 479     |
+| 7168 | 1024 | 512  | 75.1    | 7168 | 6144 | 512     | 163     |
+| 512  | 1024 | 4096 | 30.9    | 512  | 6144 | 4096    | 97.7    |
 
 In addition to the solution, this repository includes a comparison of FP8 quantized matrix multiplication (GEMM) with PyTorch’s BF16 GEMM, specifically on the AMD MI300X GPU, evaluating: Memory usage, accuracy and throughput.
 
@@ -78,7 +90,7 @@ For my solution, I used 32x32x16 instruction to calculate GEMM on problems with 
 MI300X has a cache line of 128 bytes, which matched the size of block scaling, it's beneficial that 1 warp loads data from the same cache line. Data will be loaded from global memory in chunk of 128 bytes at a time, retrieve data found in the cache line will result in a cache hit, where it only cost us the memory access latency of L2 or L1 cache instead of the slow global memory. 
 MI300X also provided us with 64 KB of shared memory (LDS) with the same speed as L1 cache, for which all threads within a block can share and access at a lower latency compared to L2 cache. We can use this for data reuse in block partitioned matrix multiplication.
 Each Compute unit in MI300X can handle 2048 threads, and each block has max thread of 1024. I will launch 2 blocks on each compute units so each block can have 32 KB of LDS to load larger tiles.
-Loop unrolling is essential since it helps the compiler to see the future and plans loading of a chunk of data and share it to each iteration or calculate offset before hand. One should make fine tune #pragma unroll to unroll fully or not unrolling at all #pragma unroll 1 to keep 64 VGPRs (vector registers) per thread for maximum theoretical occupancy per Compute Unit, maximum occupancy can help hides latency by switching to run other threads while the current threads are waiting for data to arrive. For viewing register pressure, there is a very good blog post for that https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-register-pressure-readme/ . TLDR, you can generate generated assembly and view VGPRs, SGPRs usage and occupancy using:
+Loop unrolling is essential since it helps the compiler to see the future and plans loading of a chunk of data and share it to each iteration or calculate offset before hand. One should make fine tune `#pragma unroll` to unroll fully or not unrolling at all `#pragma unroll 1` to keep 64 VGPRs (vector registers) per thread for maximum theoretical occupancy per Compute Unit, maximum occupancy can help hides latency by switching to run other threads while the current threads are waiting for data to arrive. For viewing register pressure, there is a very good blog post for that https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-register-pressure-readme/ . TLDR, you can generate generated assembly and view VGPRs, SGPRs usage and occupancy using:
 ```
 hipcc -o sgemm sgemm.cu --offload-arch=gfx942 -std=c++20 -Rpass-analysis=kernel-resource-usage --save-temps
 ```
@@ -98,13 +110,21 @@ frag_a and b need to store 32x16 = 512 elements, divided by 64 threads in a warp
 
 Looking at the mapping between the thread and the register according to https://github.com/ROCm/amd_matrix_instruction_calculator or an example at https://github.com/amd/amd-lab-notes/blob/release/matrix-cores/src/mfma_fp32_32x32x8fp16.cpp . For frag_a (32x16) the first 32 lanes (threads) in a warp will hold 8 consecutive columns of each row in the first 32 rows in matrix A. And the last 32 lanes will hold the next 8 consecutive columns of the same first 32 rows in matrix A. These hint us that we need to have these 8 consecutive element per row to be contiguous in memory, so that loading them to the 2 VGPRs can be fast. For example, if the LDS for tileA is column major, we would need 8 loads of 8 bits (ds_read_u8) to fill 2 VGPRs per lane, but if we have tileA in row major, we can read all 8 fp8 elements using a single ds_read_b64 instruction which is 8 times faster. Therefore, we will load column-major matrix A into a row-major-tileA stored in shared memory with transpose loading.
 
-The following code load use 64 threads in a warp to load 128 contiguous elements in a column of matrix A (col-maj) to 128 strided elements in a column in tileA (row-maj):
+The following code load use 64 threads in a warp to load 128 contiguous elements (coalesced read to global memory) in a column of matrix A (col-maj) to 128 strided elements (uncoalesced store to shared memory) in a column in tileA (row-maj):
 
 ```cuda
 tileA[t64x][kmini_load + t64y] = A_ptr[blockIdx.y * WMMA_M * NUM_WARP_Y + t64x + M * (kbase + kmini_load + t64y)];
 tileA[t64x + 64][kmini_load + t64y] = A_ptr[blockIdx.y * WMMA_M * NUM_WARP_Y + t64x + 64 + M * (kbase + kmini_load + t64y)];
 ```
-With kbase and mini_load is offset along the K-dimension.
+where:
+
+```
+   • kbase and kmini_load: offset along the K-dimension
+      • kbase jumps 128 elements for each iteration
+      • kmini_load jumps 16 elements for each iteration
+   • t64x: thread idx in a warp
+   • t64y: warp idx in a thread block
+```
 
 TileAs (row wise block scaling factor) is also loaded in the same manner.
 
@@ -112,7 +132,7 @@ Padding of 8 elements from 64 to 72 for the K-dimension to avoid bank conflict. 
 
 To calculate a full 128x128 block , we need 2 load loops (each load 128x64 elements per matrix) and 2 mfma loops and 1 loop to apply scalers. I found that this is faster than loading a full 128x128 block where we have to wait until 128x128 elements are fully loaded before we can do matmul. Upon inspecting the compiled code, we can see that the loading of scaling factor from SMEM to registers are interleaved with the second mfma which helped hide latency.
 
-After the second matmul, we can apply scaler. Loading the scaler in shared memory provides the benefit of the compiler generating ds_read_b128 instruction to fetch data to calculate shared memory on the accumulation fragments which is very fast:
+After the second matmul, we can apply scaler. Loading the scaler in shared memory provides the benefit of the compiler generating ds_read_b128 instruction with the help of `#pragma unroll`, to fetch data to calculate shared memory on the accumulation fragments which is very fast:
 ```cuda
 #pragma unroll
 for (int i = 0; i < 4; ++i){
