@@ -57,7 +57,7 @@ To improve accuracy, local scaling is used where each block of 128x128 elements 
 
 The AMD FP8 GEMM challenge asked the competitors to calculate row-wise block scaling for multiplying matrix A (MxK column major) and matrix B (NxK column major). The result can be intepreted as C = A@B.T where A is column major, B.T is row major and C (MxN) is row major.
 
-MI300X provides 2 matrix core instructions to help calculate small matrix multiplication:
+MI300X provides 2 matrix core (AMD's tensor core) instructions to help calculate small matrix multiplication:
 ```
 32x32x16:
         FLOPs: 32768
