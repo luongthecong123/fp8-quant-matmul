@@ -24,9 +24,15 @@ This repository contains my solution to the AMD FP8 GEMM Challenge, organized by
 | 7168 | 1024 | 512  | 75.1    | 7168 | 6144 | 512     | 163     |
 | 512  | 1024 | 4096 | 30.9    | 512  | 6144 | 4096    | 97.7    |
 
-In addition to the solution, this repository includes a comparison of FP8 quantized matrix multiplication (GEMM) with PyTorch’s BF16 GEMM, specifically on the AMD MI300X GPU, evaluating: Memory usage, accuracy and throughput.
-
-The code explores three FP8 scaling strategies:
+Future work for large M, N kernel:
+- A separate kernel for matrix transpose to make GMEM --> SMEM faster in gemm kernel, so that we can tolerate lower occupancy
+- Persistent kernel to overlap epilogue (row-wise scaling + write to GMEM) and the matmul of next matC's tile
+- Reduce occupancy from 100% to 50%:
+   - 1 CU manages 2 blocks, each block has 512 threads (50% occupancy), each thread now has 2x the amount of registers (64 --> 128)
+   - 512 threads = 4x2 warps. Each warp holds registers for 2 32x32 matC tile. One block calculates 256x128 elements in matC
+   - Memory load in 2 stages, each stage load 256x64 FP8 elems, 128x64 FP8 elems, 256 FP32 elems to tileA, tileB, tileAs respectively. Totaling (256x(64+8) + 128x(64+8) + 256x4)/1024 = 28 KB of SMEM per block.
+  
+In addition to the solution, the provided pytorch code showcases three FP8 scaling strategies:
 - **Global scaling**
 - **Block scaling** (128×128)
 - **Row-wise block scaling** (1×128)
