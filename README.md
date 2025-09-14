@@ -77,7 +77,7 @@ MI300X provides 2 matrix core (AMD's tensor core) instructions to help calculate
 FLOPS utilization calculation for MI300X:
 - FP8 peak FLOPS calculation = Peak_Engine_Clock * num_CU * FLOPs/CU/cycle = 2100e6 * 304 * 4096 = 2614.9 TFLOPS
 - FP8 achieved FLOPS on shape 7168x6144x4608 = FLOPS / Latency = 7168 * 6144 * 4608 * 2 / 948e-6 = 428.1 TFLOPS
-- FLOPS utilization = Peak / Achieved = 16.37 %
+- FLOPS utilization = Achieved / Peak = 16.37 %
 - Theoretical speed-of-light latency for shape 7168x6144x4608 = 7168 * 6144 * 4608 * 2 / 2614.9e12 = 155.2 us
 
 <div align="center">
