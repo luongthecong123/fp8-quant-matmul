@@ -84,11 +84,11 @@ FLOPS utilization calculation for MI300X:
   <table>
     <tr>
       <td align="center">
-        <h5>32x32x16 matC thread-register mapping</h3>
+        <h5>32x32x16 matC thread, register idx to mn coordinate mapping</h3>
         <img src="images\thread-register-mapping-matC-32x32x16.png" alt="32x32x16 VGPR Layout" width="600"/>
       </td>
       <td align="center">
-        <h5>16x16x32 matC thread-register mapping</h3>
+        <h5>16x16x32 matC thread, register idx to mn coordinate mapping</h3>
         <img src="images\thread-register-mapping-matC-16x16x32.png" alt="16x16x32 VGPR Layout" width="600"/>
       </td>
     </tr>
@@ -120,7 +120,7 @@ frag_c += frag_a x frag_b
 
 frag_a and b need to store 32x16 = 512 elements, divided by 64 threads in a warp, therefore, each thread will hold values of 8 fp8 elements = 64 bit or 2 32-bit VGPRs (vector register).
 
-Looking at the mapping between the thread and the register according to https://github.com/ROCm/amd_matrix_instruction_calculator or an example at https://github.com/amd/amd-lab-notes/blob/release/matrix-cores/src/mfma_fp32_32x32x8fp16.cpp . For frag_a (32x16) the first 32 lanes (threads) in a warp will hold 8 consecutive columns of each row in the first 32 rows in matrix A. And the last 32 lanes will hold the next 8 consecutive columns of the same first 32 rows in matrix A. These hint us that we need to have these 8 consecutive element per row to be contiguous in memory, so that loading them to the 2 VGPRs can be fast. For example, if the LDS for tileA is column major, we would need 8 loads of 8 bits (ds_read_u8) to fill 2 VGPRs per lane, but if we have tileA in row major, we can read all 8 fp8 elements using a single ds_read_b64 instruction which is 8 times faster. Therefore, we will load column-major matrix A into a row-major-tileA stored in shared memory with transpose loading.
+Looking at the mapping from thread & register idx to mn coordinate according to https://github.com/ROCm/amd_matrix_instruction_calculator or an example at https://github.com/amd/amd-lab-notes/blob/release/matrix-cores/src/mfma_fp32_32x32x8fp16.cpp . For frag_a (32x16) the first 32 lanes (threads) in a warp will hold 8 consecutive columns of each row in the first 32 rows in matrix A. And the last 32 lanes will hold the next 8 consecutive columns of the same first 32 rows in matrix A. These hint us that we need to have these 8 consecutive element per row to be contiguous in memory, so that loading them to the 2 VGPRs can be fast. For example, if the LDS for tileA is column major, we would need 8 loads of 8 bits (ds_read_u8) to fill 2 VGPRs per lane, but if we have tileA in row major, we can read all 8 fp8 elements using a single ds_read_b64 instruction which is 8 times faster. Therefore, we will load column-major matrix A into a row-major-tileA stored in shared memory with transpose loading.
 
 The following code load use 64 threads in a warp to load 128 contiguous elements (coalesced read to global memory) in a column of matrix A (col-maj) to 128 strided elements (uncoalesced store to shared memory) in a column in tileA (row-maj):
 
@@ -154,7 +154,7 @@ for (int i = 0; i < 4; ++i){
     }
 }
 ```
-Here, 2 accumulation fragments are used, one for the global accumulation (master), one to store intermediate accumulation per block scaling. Analyzing the 2 links provided above, one can peer into the register-thread mapping to produce the indexing.
+Here, 2 accumulation fragments are used, one for the global accumulation (master), one to store intermediate accumulation per block scaling. Analyzing the 2 links provided above, one can peer into the thread, register idx to mn coordinate mapping to produce the indexing and the 2 figures above.
 
 ### Kernel for small M, N with large K
 
